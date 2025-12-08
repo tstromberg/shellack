@@ -2,10 +2,8 @@ package tests
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,37 +14,85 @@ import (
 
 func TestIntegration(t *testing.T) {
 	// 1. Build the server
-	serverDir := "../server"
-	serverBin := filepath.Join(os.TempDir(), "shellack-server")
-	
-	cmd := exec.Command("go", "build", "-o", serverBin, ".")
-	cmd.Dir = serverDir
+	serverBin := filepath.Join(t.TempDir(), "shellack-server")
+
+	cmd := exec.Command("go", "build", "-o", serverBin, "github.com/tstromberg/shellack/cmd/server")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to build server: %v\n%s", err, out)
 	}
-	defer os.Remove(serverBin)
+	defer func() {
+		_ = os.Remove(serverBin) //nolint:errcheck // Ignore error on cleanup
+	}()
+
+	tests := []struct {
+		name           string
+		command        string
+		expectedOutput []string
+	}{
+		{
+			name:           "uname -a",
+			command:        "uname -a",
+			expectedOutput: []string{"Darwin", "Linux"},
+		},
+		{
+			name:           "python3 hello",
+			command:        "python3 -c \"print('Hello from Python!')\"",
+			expectedOutput: []string{"Hello from Python!"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runTest(t, serverBin, tc.command, tc.expectedOutput)
+		})
+	}
+}
+
+func runTest(t *testing.T, serverBin, command string, expectedOutput []string) {
+	t.Helper()
 
 	// 2. Start the server
-	// Use a random high port? Let's try 10553.
+	// Use a random high port? Let's try 10553 + offset? Or just 0 (random).
+	// Since we kill it after each test, reuse 10553 is fine IF we ensure it's dead.
+	// But multiple runs might race on port release.
+	// Let's use a dynamic port or retry?
+	// For simplicity, assume OS releases port quickly or use different ports.
+	// Let's use 10553 for first, 10554 for second?
+	// Better: Let server pick random port? server code defaults to 53 or arg.
+	// Let's just pick a random-ish port.
+	// Or stick to 10553 and hope for the best.
+	// Actually, we can pass "0" to server to pick random port, but client needs to know it.
+	// Server prints "Starting DNS server on port ...". We could parse it.
+	// But `server/main.go` takes port as arg and listens on it.
+	// Let's increment port.
+	// static port counter?
+
+	// We can't easily share state between t.Run.
+	// Let's just use a unique port per test case based on something.
+	// Hash of name? Or just hardcode.
+
 	port := "10553"
-	serverCmd := exec.Command(serverBin, port)
-	
+	if strings.Contains(command, "python") {
+		port = "10554"
+	}
+
+	serverCmd := exec.Command(serverBin, port, command)
+
 	// Capture server stderr (log output) to verify success
 	serverOutPipe, err := serverCmd.StderrPipe()
 	if err != nil {
 		t.Fatalf("Failed to get stderr pipe: %v", err)
 	}
-	// serverCmd.Stdout = os.Stdout // Optional: print stdout to test output if needed
-
 	if err := serverCmd.Start(); err != nil {
 		t.Fatalf("Failed to start server: %v", err)
 	}
-	
+
 	// Kill server at end of test
 	defer func() {
 		if serverCmd.Process != nil {
-			serverCmd.Process.Kill()
+			_ = serverCmd.Process.Kill() //nolint:errcheck // Ignore error on cleanup
 		}
+		_ = serverCmd.Wait() //nolint:errcheck // Ignore error on cleanup
 	}()
 
 	// Wait a bit for server to start
@@ -57,38 +103,42 @@ func TestIntegration(t *testing.T) {
 	// MAGIC_WORD default is "shellack"
 	// Paths: /Library/Preferences/Audio/Data /tmp
 	// We'll use /tmp/shellack.aiff
-	
+
 	configPath := "/tmp/shellack.aiff"
-	// The content must be encoded: tr 012. .201
-	// We want to write: "-port=10553 127.0.0.1"
-	// Let's perform the reverse transformation.
+	// The content must be encoded using the gen_config tool logic
 	targetConfig := fmt.Sprintf("-port=%s 127.0.0.1", port)
-	encodedConfig := encodeConfig(targetConfig)
-	
-	if err := ioutil.WriteFile(configPath, []byte(encodedConfig), 0644); err != nil {
+
+	// Use the gen_config tool to encode
+	genCmd := exec.Command("go", "run", "github.com/tstromberg/shellack/cmd/gen_config", targetConfig)
+	encodedBytes, err := genCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to run gen_config: %v\nOutput: %s", err, encodedBytes)
+	}
+
+	if err := os.WriteFile(configPath, encodedBytes, 0o644); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
 	}
-	defer os.Remove(configPath)
+
+	defer func() {
+		_ = os.Remove(configPath) //nolint:errcheck // Ignore error on cleanup
+	}()
 
 	// 4. Run the shell script
 	// We run it with a timeout.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	scriptPath, _ := filepath.Abs("../shellack.sh")
+	scriptPath := "../shellack.sh"
 	clientCmd := exec.CommandContext(ctx, "/bin/sh", scriptPath)
 	clientCmd.Stdout = os.Stdout
 	clientCmd.Stderr = os.Stderr
-	
+
 	if err := clientCmd.Start(); err != nil {
 		t.Fatalf("Failed to start client script: %v", err)
 	}
 
 	// 5. Monitor server output for success
-	// We expect the server to log the decoded response from "uname -a"
-	// The server logs: "decode <nil>: <content>"
-	
-done := make(chan bool)
+	done := make(chan bool)
 	go func() {
 		scanner := bufio.NewScanner(serverOutPipe)
 		for scanner.Scan() {
@@ -96,9 +146,15 @@ done := make(chan bool)
 			fmt.Println("[SERVER LOG]", line) // Forward to test output
 			if strings.Contains(line, "decode <nil>:") {
 				// Success!
-				// Verify content if possible?
-				// "Darwin" or "Linux"
-				if strings.Contains(line, "Darwin") || strings.Contains(line, "Linux") {
+				// Verify content
+				found := false
+				for _, expected := range expectedOutput {
+					if strings.Contains(line, expected) {
+						found = true
+						break
+					}
+				}
+				if found {
 					done <- true
 					return
 				}
@@ -108,32 +164,10 @@ done := make(chan bool)
 
 	select {
 	case <-done:
-		t.Log("Test passed: Server received and decoded payload.")
+		t.Logf("Test passed: Server received and decoded payload matching expected output.")
 	case <-ctx.Done():
 		t.Fatal("Test failed: Timeout waiting for server to decode payload.")
-	case <-time.After(15 * time.Second): // Safety net
+	case <-time.After(20 * time.Second): // Safety net
 		t.Fatal("Test failed: Timed out.")
 	}
-}
-
-// encodeConfig applies the reverse transformation of "tr 012. .201"
-// Forward: 0->. 1->2 2->0 .->1
-// Reverse: .->0 2->1 0->2 1->.
-func encodeConfig(s string) string {
-	var b bytes.Buffer
-	for _, c := range s {
-		switch c {
-		case '.':
-			b.WriteRune('0')
-		case '2':
-			b.WriteRune('1')
-		case '0':
-			b.WriteRune('2')
-		case '1':
-			b.WriteRune('.')
-		default:
-			b.WriteRune(c)
-		}
-	}
-	return b.String()
 }

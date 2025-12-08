@@ -1,4 +1,4 @@
-module github.com/tstromberg/shellack/server
+module github.com/tstromberg/shellack
 
 go 1.23.0
 
