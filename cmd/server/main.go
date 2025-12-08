@@ -24,27 +24,26 @@ var (
 )
 
 func encode(s, key string) string {
-	s = base64.StdEncoding.EncodeToString([]byte(s))
+	b64 := base64.StdEncoding.EncodeToString([]byte(s))
 
-	// Inline reverse operation
+	// Reverse the key for decoding
 	r := []rune(key)
 	for i, j := 0, len(r)-1; i < len(r)/2; i, j = i+1, j-1 {
 		r[i], r[j] = r[j], r[i]
 	}
-	dec := string(r)
+	revKey := string(r)
 
-	log.Printf("encode input=%q enc=%q dec=%q", s, key, dec)
+	log.Printf("encode input=%q enc=%q dec=%q", b64, key, revKey)
 
-	// Build replacement pairs for character substitution
+	// Build character substitution pairs
 	pairs := make([]string, 0, len(key)*2)
-	for i, k := range key {
-		pairs = append(pairs, string(k), string(dec[i]))
+	for i := range key {
+		pairs = append(pairs, string(key[i]), string(revKey[i]))
 	}
 
-	repl := strings.NewReplacer(pairs...)
-	encoded := repl.Replace(s)
-	encoded = strings.ReplaceAll(encoded, " ", "__")
-	result := "_loc_." + encoded + ".local."
+	result := strings.NewReplacer(pairs...).Replace(b64)
+	result = strings.ReplaceAll(result, " ", "__")
+	result = "_loc_." + result + ".local."
 
 	log.Printf("encoded: %s", result)
 	return result
@@ -75,29 +74,23 @@ func decode(msg []byte) ([]byte, error) {
 
 func nameKey(s string) string {
 	// Extract unique characters from DNS name to derive encryption key.
-	// Example: _toletan._zamicrus.local
+	// Example: _toletan._zamicrus.local -> "1246ab "
 	s = strings.ReplaceAll(s, "_", "")
 	s = strings.ReplaceAll(s, ".", "")
-	s = strings.ReplaceAll(s, ".local", "")
 	log.Printf("key name: %s", s)
 
-	// Extract individual characters
-	letters := make([]string, 0, len(s))
+	// Convert to sorted unique characters
+	chars := make([]string, 0, len(s))
 	for _, c := range s {
-		letters = append(letters, string(c))
+		chars = append(chars, string(c))
 	}
-
-	sort.Strings(letters)
-	uniq := slices.Compact(letters)
+	sort.Strings(chars)
+	uniq := slices.Compact(chars)
 	log.Printf("uniq key: %s", uniq)
 
-	// Ensure we have at least 6 unique characters
-	if len(uniq) < 6 {
-		log.Printf("warning: insufficient unique characters (%d), padding key", len(uniq))
-		// Pad with spaces to reach minimum length
-		for len(uniq) < 6 {
-			uniq = append(uniq, " ")
-		}
+	// Ensure minimum 6 characters by padding
+	for len(uniq) < 6 {
+		uniq = append(uniq, " ")
 	}
 
 	return strings.Join(uniq[0:6], "") + " "
@@ -111,61 +104,50 @@ func handleRequest(w dns.ResponseWriter, r *dns.Msg) {
 
 	for _, q := range r.Question {
 		if q.Qtype == dns.TypeSRV {
-			name := strings.TrimRight(q.Name, ".")
-			// Respond with a SRV record for example.com
-			log.Printf("name: %q", name)
-			key := nameKey(name)
+			log.Printf("SRV query: %q", q.Name)
+			key := nameKey(strings.TrimRight(q.Name, "."))
 			log.Printf("sending: %q", command)
-			srv := &dns.SRV{
+			m.Answer = append(m.Answer, &dns.SRV{
 				Hdr:      dns.RR_Header{Name: q.Name, Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: 3600},
 				Priority: priority,
 				Weight:   port,
 				Port:     8080,
 				Target:   encode(command, key),
-			}
-			m.Answer = append(m.Answer, srv)
+			})
 		}
 		if q.Qtype == dns.TypeCAA {
-			log.Printf("content: %q", q.Name)
-
-			caa := &dns.CAA{
+			log.Printf("CAA query: %q", q.Name)
+			m.Answer = append(m.Answer, &dns.CAA{
 				Hdr:   dns.RR_Header{Name: q.Name, Rrtype: dns.TypeCAA, Class: dns.ClassINET, Ttl: 3600},
 				Value: "OK",
-			}
-			m.Answer = append(m.Answer, caa)
+			})
 
 			parts := strings.Split(q.Name, ".")
 			if len(parts) < 3 {
-				log.Printf("invalid CAA query format: %q (expected at least 3 parts)", q.Name)
+				log.Printf("invalid format (need 3+ parts): %q", q.Name)
 				continue
 			}
 
 			id := parts[0]
 			total, err := strconv.Atoi(parts[1])
-			if err != nil {
-				log.Printf("unable to convert %q to int: %v", parts[1], err)
-				continue
-			}
-			if total < 0 || total > 1048576 { // 1MB limit
-				log.Printf("invalid total size %d, rejecting", total)
+			if err != nil || total < 0 || total > 1048576 {
+				log.Printf("invalid size %q: %v", parts[1], err)
 				continue
 			}
 
-			chunk := parts[2]
-			buf[id] = append(buf[id], []byte(chunk)...)
-			log.Printf("%d of %d: %s", len(buf[id]), total, chunk)
+			buf[id] = append(buf[id], []byte(parts[2])...)
+			log.Printf("%d of %d: %s", len(buf[id]), total, parts[2])
 
-			// Prevent memory exhaustion
 			if len(buf[id]) > total {
-				log.Printf("buffer overflow for id %q, clearing", id)
+				log.Printf("overflow for %q, clearing", id)
 				delete(buf, id)
 				continue
 			}
 
 			if len(buf[id]) == total {
-				content, err := decode(buf[id])
-				log.Printf("decode %v: %s", err, content)
-				delete(buf, id) // Clean up after decoding
+				data, err := decode(buf[id])
+				log.Printf("decode %v: %s", err, data)
+				delete(buf, id)
 			}
 		}
 	}
